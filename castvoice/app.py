@@ -20,7 +20,14 @@ from .library import Library, Recorder, Settings, VoiceStore, audio_sources
 
 log = logging.getLogger("castvoice")
 
-AUDIO_EXT = {".mp3", ".wav", ".ogg", ".opus", ".flac", ".m4a", ".aac", ".wma", ".webm", ".mp4"}
+PURE_AUDIO_EXT = {".mp3", ".wav", ".ogg", ".opus", ".flac", ".m4a", ".aac", ".wma"}
+VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".ts"}
+AUDIO_EXT = PURE_AUDIO_EXT | VIDEO_EXT  # dai video si usa solo la traccia audio
+FILE_FILTER = (
+    "Audio e video (" + " ".join(f"*{e}" for e in sorted(AUDIO_EXT)) + ");;"
+    "Solo audio (" + " ".join(f"*{e}" for e in sorted(PURE_AUDIO_EXT)) + ");;"
+    "Solo video (" + " ".join(f"*{e}" for e in sorted(VIDEO_EXT)) + ");;Tutti i file (*)"
+)
 SAMPLE_TEXT = (
     "Ciao, sono io. Oggi è una bella giornata e sto registrando un campione della mia voce, "
     "parlando con calma e in modo naturale. Più il campione è pulito, senza rumori di fondo, "
@@ -83,9 +90,16 @@ class Task(QRunnable):
             result = self.fn()
         except Exception as exc:  # noqa: BLE001 - l'errore va mostrato all'utente
             log.exception("task fallito")
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+            self._emit(self.signals.failed, f"{type(exc).__name__}: {exc}")
         else:
-            self.signals.done.emit(result)
+            self._emit(self.signals.done, result)
+
+    @staticmethod
+    def _emit(signal, value) -> None:
+        try:
+            signal.emit(value)
+        except RuntimeError:
+            pass  # la finestra è già stata chiusa: niente da aggiornare
 
 
 # --------------------------------------------------------------------------
@@ -596,7 +610,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(14, 14, 14, 14)
-        lay.addWidget(self._label("I tuoi audio – trascina qui i file o usa «Aggiungi»", "title"))
+        lay.addWidget(self._label("I tuoi audio e video (dei video si sente solo l'audio) – trascina qui i file o usa «Aggiungi»", "title"))
         self.audio_list = DropList()
         self.audio_list.files_dropped.connect(self.add_files)
         self.audio_list.itemDoubleClicked.connect(lambda _i: self.play_selected())
@@ -626,7 +640,12 @@ class MainWindow(QMainWindow):
     def refresh_library(self) -> None:
         self.audio_list.clear()
         for it in self.library.items():
-            icon = "🎙" if it.kind == "clip" else "♪"
+            if it.kind == "clip":
+                icon = "🎙"
+            elif Path(it.path).suffix.lower() in VIDEO_EXT:
+                icon = "🎬"  # video: verrà riprodotto solo l'audio
+            else:
+                icon = "♪"
             label = f"{icon}  {it.name}" + ("" if it.exists else "   (file mancante)")
             li = QListWidgetItem(label)
             li.setData(Qt.UserRole, it.id)
@@ -636,8 +655,8 @@ class MainWindow(QMainWindow):
             self.audio_list.addItem(li)
 
     def pick_files(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(self, "Scegli audio", str(Path.home()),
-                                                "Audio (*.mp3 *.wav *.ogg *.opus *.flac *.m4a *.aac *.wma);;Tutti i file (*)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Scegli audio o video (dei video si usa solo l'audio)",
+                                                str(Path.home()), FILE_FILTER)
         self.add_files([Path(f) for f in files])
 
     def add_files(self, files: list[Path]) -> None:

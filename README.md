@@ -16,6 +16,7 @@
   - **la tua voce clonata** (XTTS v2, sulla tua GPU) · **your own cloned voice**
   - velocità regolabile e **frasi rapide** salvate · speed control and saved quick phrases
 - 🎵 **Audio**: trascina i tuoi file (mp3, wav, ogg, flac, m4a…) e riproducili sui Google · drag & drop your files
+- 🎬 **Video → solo audio**: aggiungi un video (mp4, mkv, webm, mov, avi…) e sui Google si sente solo la sua traccia audio · add a video and only its soundtrack is played
 - 🎙 **Registra clip** con il microfono e riproducile quando vuoi · record voice clips and play them anytime
 
 ## Privacy

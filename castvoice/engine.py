@@ -130,11 +130,26 @@ class LanServer:
 # --------------------------------------------------------------------------
 # Audio
 # --------------------------------------------------------------------------
+def _cleanup_cache(max_age: float = 86400.0) -> None:
+    """Cancella gli audio generati/estratti più vecchi di un giorno."""
+    now = time.time()
+    for f in paths.CACHE_DIR.glob("*"):
+        try:
+            if f.is_file() and now - f.stat().st_mtime > max_age:
+                f.unlink()
+        except OSError:
+            pass
+
+
 def prepare_audio(src: Path) -> Path:
-    """Converte in MP3 (formato che tutti i Google Cast leggono)."""
+    """Converte in MP3 (formato che tutti i Google Cast leggono).
+
+    Se `src` è un video, ffmpeg scarta l'immagine (-vn) e tiene solo l'audio.
+    """
     if src.suffix.lower() == ".mp3":
         return src
     paths.ensure_dirs()
+    _cleanup_cache()
     out = paths.CACHE_DIR / f"{uuid.uuid4().hex}.mp3"
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "2", "-b:a", "160k", str(out)],
