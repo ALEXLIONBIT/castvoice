@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CastVoice
+GenericName=Parla e riproduci sui Google Nest
+Comment=Fai parlare i Google Nest / Google Cast con la voce che vuoi e riproduci i tuoi audio
+Comment[en]=Make Google Nest / Google Cast speakers talk in any voice and play your audio files
+Exec="@DIR@/run.sh"
+Icon=castvoice
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=google;nest;cast;chromecast;voce;tts;audio;
+StartupWMClass=castvoice
+StartupNotify=true

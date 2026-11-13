@@ -1,0 +1,20 @@
+# ambiente e cache
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# DATI PERSONALI: la voce non va mai pubblicata
+*.wav
+*.mp3
+*.ogg
+*.opus
+*.flac
+*.m4a
+*.aac
+voices/
+clips/
+clone-env/
+library.json
+settings.json
+.env
