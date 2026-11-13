@@ -51,6 +51,7 @@ class Settings:
         "voice": "edge:it-IT-IsabellaNeural",       # id voce scelta
         "rate": 0,                                  # velocità: -50..+50 (%)
         "phrases": [],                              # frasi rapide [{text, voice}]
+        "favorite_voices": [],                      # id delle voci preferite
         "xtts_license_accepted": False,             # licenza CPML del modello XTTS
         "mic": "",                                  # sorgente audio per registrare
     }

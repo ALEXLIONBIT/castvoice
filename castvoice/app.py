@@ -1,7 +1,9 @@
 """Interfaccia grafica di CastVoice (PySide6)."""
 from __future__ import annotations
 
+import locale
 import logging
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -307,6 +309,182 @@ class RecordDialog(QDialog):
         super().reject()
 
 
+# --------------------------------------------------------------------------
+# Selettore voci
+# --------------------------------------------------------------------------
+ENGINE_BADGE = {"clone": "🎙", "espeak": "💻", "edge": "🌐"}
+ENGINE_RANK = {"clone": 0, "edge": 1, "espeak": 2}
+ENGINE_WORDS = {"clone": "mia voce clonata", "espeak": "locale offline", "edge": "online naturale"}
+
+
+class VoicePicker(QWidget):
+    """Scelta della voce a livelli: tipo → lingua → ricerca → elenco, con preferite e anteprima."""
+
+    changed = Signal(str)
+    preview_requested = Signal(str)
+
+    TYPES = [("all", "Tutte le voci"), ("fav", "★ Preferite"), ("clone", "🎙 La mia voce"),
+             ("espeak", "💻 Locali (senza internet)"), ("edge", "🌐 Online (naturali)")]
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__()
+        self.settings = settings
+        self.voices: list[tts.Voice] = []
+        self._current: str = settings.get("voice") or ""
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        filt = QHBoxLayout()
+        self.type_combo = QComboBox()
+        for key, label in self.TYPES:
+            self.type_combo.addItem(label, key)
+        self.lang_combo = QComboBox()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔍 Cerca: nome, uomo, donna…")
+        self.search.setClearButtonEnabled(True)
+        filt.addWidget(self.type_combo, 2)
+        filt.addWidget(self.lang_combo, 2)
+        filt.addWidget(self.search, 3)
+        lay.addLayout(filt)
+
+        self.list = QListWidget()
+        self.list.setMinimumHeight(120)
+        lay.addWidget(self.list, 1)
+
+        bottom = QHBoxLayout()
+        self.chosen = QLabel()
+        self.chosen.setStyleSheet("color: #22d3ee; font-weight: 700;")
+        self.chosen.setWordWrap(True)
+        self.count = QLabel()
+        self.count.setObjectName("muted")
+        self.fav_btn = QPushButton("☆ Preferita")
+        self.prev_btn = QPushButton("🔊 Anteprima")
+        self.prev_btn.setToolTip("Ascolta la voce sul PC (anche doppio clic sulla voce)")
+        bottom.addWidget(self.chosen, 1)
+        bottom.addWidget(self.count)
+        bottom.addWidget(self.fav_btn)
+        bottom.addWidget(self.prev_btn)
+        lay.addLayout(bottom)
+
+        self.type_combo.currentIndexChanged.connect(self._refilter)
+        self.lang_combo.currentIndexChanged.connect(self._refilter)
+        self.search.textChanged.connect(self._refilter)
+        self.list.currentItemChanged.connect(self._picked)
+        self.list.itemDoubleClicked.connect(lambda _i: self._preview())
+        self.fav_btn.clicked.connect(self._toggle_fav)
+        self.prev_btn.clicked.connect(self._preview)
+
+    # ---- API ----------------------------------------------------------------
+    def current_id(self) -> str:
+        return self._current
+
+    def set_voices(self, voices: list[tts.Voice]) -> None:
+        self.voices = voices
+        cur = self._voice(self._current)
+        langs = sorted({v.lang for v in voices if v.lang}, key=lambda c: (c != "it", tts.LANG_NAMES.get(c, c)))
+        previous = self.lang_combo.currentData()  # None alla prima volta
+        self.lang_combo.blockSignals(True)
+        self.lang_combo.clear()
+        self.lang_combo.addItem("Tutte le lingue", "")
+        for code in langs:
+            self.lang_combo.addItem(tts.LANG_NAMES.get(code, code), code)
+        wanted = previous if previous is not None else (cur.lang if cur and cur.lang else "it")
+        self.lang_combo.setCurrentIndex(max(0, self.lang_combo.findData(wanted)))
+        self.lang_combo.blockSignals(False)
+        self._refilter()
+        self._update_chosen()
+
+    # ---- interno ------------------------------------------------------------
+    def _voice(self, voice_id: str) -> tts.Voice | None:
+        return next((v for v in self.voices if v.id == voice_id), None)
+
+    def _favs(self) -> list[str]:
+        return list(self.settings.get("favorite_voices") or [])
+
+    @staticmethod
+    def _matches(v: tts.Voice, kind: str, lang: str, tokens: list[str], favs: set[str]) -> bool:
+        if kind == "fav" and v.id not in favs:
+            return False
+        if kind in ("clone", "espeak", "edge") and v.engine != kind:
+            return False
+        if lang and v.lang and v.lang != lang:  # le voci senza lingua (clonate) restano sempre
+            return False
+        hay = f"{v.name} {v.gender} {v.locale} {tts.LANG_NAMES.get(v.lang, '')} {ENGINE_WORDS.get(v.engine, '')}".lower()
+        return all(t in hay for t in tokens)
+
+    @staticmethod
+    def _item_text(v: tts.Voice, fav: bool) -> str:
+        sesso = f" · {v.gender}" if v.gender else ""
+        where = {"clone": "tua voce clonata", "espeak": "locale", "edge": f"online · {v.locale}"}.get(v.engine, "")
+        return f"{ENGINE_BADGE.get(v.engine, '')}  {'★ ' if fav else ''}{v.name}{sesso}  ·  {where}"
+
+    def _refilter(self, *_args) -> None:
+        kind = self.type_combo.currentData()
+        lang = self.lang_combo.currentData() or ""
+        tokens = self.search.text().lower().split()
+        favs = set(self._favs())
+        shown = [v for v in self.voices if self._matches(v, kind, lang, tokens, favs)]
+        shown.sort(key=lambda v: (v.id not in favs, ENGINE_RANK.get(v.engine, 9),
+                                  v.lang not in ("it", ""), v.locale, v.name.lower()))  # italiano per primo
+        self.list.blockSignals(True)
+        self.list.clear()
+        target = None
+        for v in shown:
+            item = QListWidgetItem(self._item_text(v, v.id in favs))
+            item.setData(Qt.UserRole, v.id)
+            item.setToolTip(v.label)
+            self.list.addItem(item)
+            if v.id == self._current:
+                target = item
+        if not shown:
+            hint = {"clone": "Nessuna voce clonata: creala nella scheda «La mia voce».",
+                    "fav": "Nessuna preferita: scegli una voce e premi «☆ Preferita»."}.get(
+                        kind, "Nessuna voce con questi filtri.")
+            item = QListWidgetItem(hint)
+            item.setFlags(Qt.NoItemFlags)
+            self.list.addItem(item)
+        if target is not None:
+            self.list.setCurrentItem(target)
+            self.list.scrollToItem(target)
+        self.list.blockSignals(False)
+        self.count.setText(f"{len(shown)} voci")
+
+    def _picked(self, item, _previous=None) -> None:
+        voice_id = item.data(Qt.UserRole) if item else None
+        if not voice_id:
+            return
+        self._current = voice_id
+        self._update_chosen()
+        self.changed.emit(voice_id)
+
+    def _update_chosen(self) -> None:
+        v = self._voice(self._current)
+        if v is None:
+            self.chosen.setText("Scegli una voce dall'elenco")
+            self.fav_btn.setText("☆ Preferita")
+            return
+        extra = " · ".join(x for x in (v.gender, v.locale or tts.LANG_NAMES.get(v.lang, "")) if x)
+        self.chosen.setText(f"Voce scelta: {v.name}" + (f" ({extra})" if extra else "") + f" · {ENGINE_WORDS.get(v.engine, '')}")
+        self.fav_btn.setText("★ Preferita" if self._current in self._favs() else "☆ Preferita")
+
+    def _toggle_fav(self) -> None:
+        if not self._current:
+            return
+        favs = self._favs()
+        if self._current in favs:
+            favs.remove(self._current)
+        else:
+            favs.append(self._current)
+        self.settings.set("favorite_voices", favs)
+        self._refilter()
+        self._update_chosen()
+
+    def _preview(self) -> None:
+        if self._current:
+            self.preview_requested.emit(self._current)
+
+
 class DropList(QListWidget):
     files_dropped = Signal(list)
 
@@ -333,7 +511,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         paths.ensure_dirs()
         self.setWindowTitle("CastVoice")
-        self.resize(1040, 680)
+        self.resize(1100, 780)
         self.settings = Settings()
         self.library = Library()
         self.store = VoiceStore()
@@ -344,6 +522,7 @@ class MainWindow(QMainWindow):
         self.voices: list[tts.Voice] = []
         self.install_proc: QProcess | None = None
         self._busy = 0
+        self._preview_proc: subprocess.Popen | None = None
 
         self.panel = DevicePanel()
         self.panel.refresh_requested.connect(self.refresh_devices)
@@ -467,14 +646,15 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._label("Cosa vuoi far dire?", "title"))
         self.text = QPlainTextEdit()
         self.text.setPlaceholderText("Scrivi qui il messaggio… (Ctrl+Invio per inviarlo)")
-        self.text.setFixedHeight(120)
+        self.text.setFixedHeight(84)
         lay.addWidget(self.text)
+        lay.addWidget(self._label("Scegli la voce", "title"))
+        self.voice_picker = VoicePicker(self.settings)
+        self.voice_picker.changed.connect(self._voice_changed)
+        self.voice_picker.preview_requested.connect(self.preview_voice)
+        lay.addWidget(self.voice_picker, 3)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Voce"))
-        self.voice_combo = QComboBox()
-        self.voice_combo.setMinimumWidth(280)
-        self.voice_combo.currentIndexChanged.connect(self._voice_changed)
-        row.addWidget(self.voice_combo, 1)
+        row.addStretch(1)
         row.addWidget(QLabel("Velocità"))
         self.rate = QSlider(Qt.Horizontal)
         self.rate.setRange(-50, 50)
@@ -501,7 +681,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._label("Frasi rapide (doppio clic per dirle)", "title"))
         self.phrase_list = QListWidget()
         self.phrase_list.itemDoubleClicked.connect(self._phrase_activated)
-        lay.addWidget(self.phrase_list, 1)
+        self.phrase_list.setMaximumHeight(96)
+        lay.addWidget(self.phrase_list)
         rm = QPushButton("Elimina frase selezionata")
         rm.clicked.connect(self.delete_phrase)
         lay.addWidget(rm, 0, Qt.AlignRight)
@@ -525,18 +706,28 @@ class MainWindow(QMainWindow):
         self._populate_voice_combo()
 
     def _populate_voice_combo(self) -> None:
-        wanted = self.voice_combo.currentData() or self.settings.get("voice")
-        self.voice_combo.blockSignals(True)
-        self.voice_combo.clear()
-        for v in self.voices:
-            self.voice_combo.addItem(v.label, v.id)
-        idx = self.voice_combo.findData(wanted)
-        self.voice_combo.setCurrentIndex(max(0, idx))
-        self.voice_combo.blockSignals(False)
+        self.voice_picker.set_voices(self.voices)
 
-    def _voice_changed(self) -> None:
-        if self.voice_combo.currentData():
-            self.settings.set("voice", self.voice_combo.currentData())
+    def _voice_changed(self, voice_id: str) -> None:
+        self.settings.set("voice", voice_id)
+
+    def preview_voice(self, voice_id: str) -> None:
+        """Fa sentire la voce sul PC (non sui Google), così si sceglie senza disturbare nessuno."""
+        voice = next((v for v in self.voices if v.id == voice_id), None)
+        lang = voice.lang if voice and voice.lang else (self.settings.get("clone_lang") or "it")
+        text = tts.SAMPLE_PHRASES.get(lang, tts.SAMPLE_PHRASES["en"])
+        rate = self.rate.value()
+        self.msg("Preparo l'anteprima…")
+
+        def job():
+            audio = tts.synthesize(voice_id, text, self.store, self.clone, rate, lang)
+            if self._preview_proc and self._preview_proc.poll() is None:
+                self._preview_proc.terminate()  # una sola anteprima alla volta
+            self._preview_proc = subprocess.Popen(
+                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(audio)])
+            self._preview_proc.wait()
+
+        self.run_task(job, lambda _r: self.msg("Anteprima finita."))
 
     def _rate_changed(self, value: int) -> None:
         self.rate_label.setText(f"{value:+d}%")
@@ -550,7 +741,7 @@ class MainWindow(QMainWindow):
         devices = self._targets()
         if not devices:
             return
-        voice_id = voice_id or self.voice_combo.currentData()
+        voice_id = voice_id or self.voice_picker.current_id()
         rate = self.rate.value()
         lang = self.settings.get("clone_lang") or "it"
         self._set_busy(1)
@@ -576,7 +767,7 @@ class MainWindow(QMainWindow):
         if not text:
             return
         phrases = self.settings.get("phrases")
-        phrases.append({"text": text, "voice": self.voice_combo.currentData()})
+        phrases.append({"text": text, "voice": self.voice_picker.current_id()})
         self.settings.set("phrases", phrases)
         self.refresh_phrases()
 
@@ -590,7 +781,7 @@ class MainWindow(QMainWindow):
     def _phrase_activated(self, item: QListWidgetItem) -> None:
         p = self.settings.get("phrases")[self.phrase_list.row(item)]
         self.text.setPlainText(p["text"])
-        self.speak(p["text"], p.get("voice") or self.voice_combo.currentData())
+        self.speak(p["text"], p.get("voice") or self.voice_picker.current_id())
 
     def delete_phrase(self) -> None:
         row = self.phrase_list.currentRow()
@@ -866,6 +1057,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self.install_proc is not None:
             self.install_proc.kill()
+        if self._preview_proc and self._preview_proc.poll() is None:
+            self._preview_proc.terminate()
         self.clone.close()
         self.player.close()
         event.accept()
@@ -874,6 +1067,7 @@ class MainWindow(QMainWindow):
 def run() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     app = QApplication(sys.argv)
+    locale.setlocale(locale.LC_TIME, "C")  # le date HTTP (usate da edge-tts) vanno lette in inglese
     app.setApplicationName("CastVoice")
     app.setDesktopFileName("castvoice")
     app.setStyle("Fusion")

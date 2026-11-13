@@ -19,15 +19,27 @@ from .library import VoiceStore
 
 log = logging.getLogger("castvoice")
 
-ESPEAK_VOICES = [
-    ("it", "Italiano (robot classico)"),
-    ("it+m3", "Italiano – uomo"),
-    ("it+m7", "Italiano – uomo grave"),
-    ("it+f2", "Italiano – donna"),
-    ("it+f4", "Italiano – donna acuta"),
-    ("it+whisper", "Italiano – sussurro"),
-    ("it+croak", "Italiano – rospo"),
+ESPEAK_VOICES = [  # (id espeak, nome, genere)
+    ("it", "Robot classico", ""),
+    ("it+m3", "Uomo", "uomo"),
+    ("it+m7", "Uomo grave", "uomo"),
+    ("it+f2", "Donna", "donna"),
+    ("it+f4", "Donna acuta", "donna"),
+    ("it+whisper", "Sussurro", ""),
+    ("it+croak", "Rospo", ""),
 ]
+
+LANG_NAMES = {"it": "Italiano", "en": "English", "es": "Español", "fr": "Français", "de": "Deutsch", "pt": "Português"}
+
+# Frase dell'anteprima, nella lingua della voce.
+SAMPLE_PHRASES = {
+    "it": "Ciao, questa è la mia voce. Ti piace?",
+    "en": "Hello, this is my voice. Do you like it?",
+    "es": "Hola, esta es mi voz. ¿Te gusta?",
+    "fr": "Bonjour, voici ma voix. Elle te plaît ?",
+    "de": "Hallo, das ist meine Stimme. Gefällt sie dir?",
+    "pt": "Olá, esta é a minha voz. Gostas?",
+}
 
 # Se non c'è rete per scaricare l'elenco, queste restano disponibili.
 EDGE_FALLBACK = [
@@ -44,6 +56,10 @@ class Voice:
     id: str
     label: str
     engine: str  # espeak | edge | clone
+    name: str = ""
+    lang: str = ""     # "it", "en"…; vuoto = qualsiasi lingua (voce clonata)
+    gender: str = ""   # "donna" | "uomo" | ""
+    locale: str = ""   # es. "it-IT"
 
     @property
     def online(self) -> bool:
@@ -73,13 +89,15 @@ def edge_voices() -> list[tuple[str, str, str, str]]:
 
 
 def list_voices(store: VoiceStore, online: bool = True) -> list[Voice]:
-    voices = [Voice(f"espeak:{v}", f"{label} · locale", "espeak") for v, label in ESPEAK_VOICES]
+    voices = [Voice(f"espeak:{v}", f"{name} · italiano · locale", "espeak", name, "it", gender, "it-IT")
+              for v, name, gender in ESPEAK_VOICES]
     for p in store.profiles():
-        voices.insert(0, Voice(f"clone:{p.slug}", f"La mia voce – {p.name} · clonata", "clone"))
+        voices.insert(0, Voice(f"clone:{p.slug}", f"La mia voce – {p.name} · clonata", "clone", p.name))
     if online:
         for short, name, gender, locale in edge_voices():
             sesso = "donna" if gender == "Female" else "uomo"
-            voices.append(Voice(f"edge:{short}", f"{name} ({sesso}, {locale}) · online", "edge"))
+            voices.append(Voice(f"edge:{short}", f"{name} ({sesso}, {locale}) · online", "edge",
+                                name, locale.split("-")[0], sesso, locale))
     return voices
 
 
@@ -169,7 +187,13 @@ def synthesize(voice_id: str, text: str, store: VoiceStore, clone: CloneEngine,
         import edge_tts
 
         mp3 = out.with_suffix(".mp3")
-        asyncio.run(edge_tts.Communicate(text, name, rate=f"{rate:+d}%").save(str(mp3)))
+        try:
+            asyncio.run(edge_tts.Communicate(text, name, rate=f"{rate:+d}%").save(str(mp3)))
+        except Exception as exc:  # noqa: BLE001 - rete assente, servizio cambiato, ecc.
+            raise RuntimeError(
+                "La voce online non risponde (serve internet; se persiste aggiorna edge-tts). "
+                f"Prova una voce locale 💻. Dettaglio: {type(exc).__name__}"
+            ) from exc
         return mp3
     if engine == "clone":
         profile = next((p for p in store.profiles() if p.slug == name), None)
