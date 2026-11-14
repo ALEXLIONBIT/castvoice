@@ -20,6 +20,29 @@
 - 🎬 **Video → solo audio**: aggiungi un video (mp4, mkv, webm, mov, avi…) e sui Google si sente solo la sua traccia audio · add a video and only its soundtrack is played
 - 🎙 **Registra clip** con il microfono e riproducile quando vuoi · record voice clips and play them anytime
 
+## App Android · Android app
+
+📱 Nella cartella [`android/`](android/) c'è la versione **mobile** (APK): Kotlin + Jetpack Compose + Google Cast SDK. *The `android/` folder holds the mobile version (APK).*
+
+- 🔎 trova i Google Nest / Chromecast sulla rete, volume e stop · finds speakers, volume, stop
+- 💬 **Parla** con le voci del telefono («Sintesi vocale Google»: offline e online di alta qualità), con la stessa **scelta voce organizzata** (filtri tipo/lingua, ricerca, ★ preferite, 🔊 anteprima) e frasi rapide · speak with the phone's TTS voices
+- 🎵 **Audio** e 🎬 **video → solo audio** dai file del telefono · audio files and video soundtracks
+- 🎙 **Registra clip** con il microfono e riproducili sui Google · record clips and play them on the speakers
+- Il telefono serve i file ai Google con un mini server HTTP locale (solo finché l'app è aperta) · local HTTP server, only while the app is open
+
+Limiti rispetto al desktop: un dispositivo alla volta (Cast SDK), niente voci Microsoft Edge e niente clonazione della voce (restano sul PC). *Limits: one speaker at a time; no Edge voices and no voice cloning (desktop only).*
+
+**Installare l'APK**: copialo sul telefono, apri il file e consenti «installa app sconosciute» per quell'app. Telefono e Google devono stare sullo stesso Wi-Fi.
+
+**Compilarlo** (JDK 17/21 + Android SDK, `platforms;android-35`, `build-tools;35.0.0`):
+
+```bash
+cd android
+./gradlew assembleRelease     # → app/build/outputs/apk/release/app-release.apk
+```
+
+La firma usa una chiave **tua**, fuori dal repository: crea `~/.android/castvoice-signing.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`) con `keytool -genkeypair …`. Le registrazioni restano nella memoria privata dell'app e il backup cloud è disattivato.
+
 ## Privacy
 
 La tua voce **non lascia mai il tuo computer**: registrazioni, campioni e profili vivono in
