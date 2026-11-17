@@ -15,9 +15,14 @@ __pycache__/
 voices/
 clips/
 clone-env/
+clone-env-qwen/
 library.json
 settings.json
 .env
+
+# pacchetti di build (si rigenerano con packaging/build.py)
+build-pkg/
+dist-release/
 
 # Android
 android/.gradle/

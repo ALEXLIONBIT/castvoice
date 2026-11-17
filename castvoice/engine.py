@@ -152,7 +152,7 @@ def prepare_audio(src: Path) -> Path:
     _cleanup_cache()
     out = paths.CACHE_DIR / f"{uuid.uuid4().hex}.mp3"
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "2", "-b:a", "160k", str(out)],
+        [paths.tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "2", "-b:a", "160k", str(out)],
         check=True,
     )
     return out
@@ -161,7 +161,7 @@ def prepare_audio(src: Path) -> Path:
 def duration_seconds(path: Path) -> float:
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+            [paths.tool("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         return float(out)

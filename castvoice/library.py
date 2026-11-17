@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -165,7 +166,7 @@ class VoiceStore:
         folder.mkdir(parents=True, exist_ok=True)
         folder.chmod(0o700)
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(sample_src), "-ac", "1", "-ar", "24000", str(folder / "sample.wav")],
+            [paths.tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(sample_src), "-ac", "1", "-ar", "24000", str(folder / "sample.wav")],
             check=True,
         )
         profile = Profile(slug, name, _now())
@@ -177,10 +178,36 @@ class VoiceStore:
 
 
 # --------------------------------------------------------------------------
-# Registratore (PipeWire)
+# Registratore: PipeWire su Linux, ffmpeg (DirectShow / AVFoundation) su Windows e macOS
 # --------------------------------------------------------------------------
+def _ffmpeg_audio_sources() -> list[tuple[str, str]]:
+    """Microfoni su Windows (DirectShow) e macOS (AVFoundation), come li elenca ffmpeg."""
+    if sys.platform == "win32":
+        cmd = [paths.tool("ffmpeg"), "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
+    else:
+        cmd = [paths.tool("ffmpeg"), "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+    try:
+        text = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
+    except OSError:
+        return []
+    out: list[tuple[str, str]] = []
+    if sys.platform == "win32":
+        for m in re.finditer(r'"([^"]+)"\s+\(audio\)', text):
+            out.append((m.group(1), m.group(1)))
+    else:
+        in_audio = False
+        for line in text.splitlines():
+            if "AVFoundation audio devices" in line:
+                in_audio = True
+            elif in_audio and (m := re.search(r"\[(\d+)\]\s+(.+)$", line)):
+                out.append((m.group(1), m.group(2).strip()))
+    return out
+
+
 def audio_sources() -> list[tuple[str, str]]:
     """Microfoni disponibili: [(nome_tecnico, descrizione)]."""
+    if not sys.platform.startswith("linux"):
+        return _ffmpeg_audio_sources()
     try:
         text = subprocess.run(["pactl", "list", "sources"], capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.SubprocessError):
@@ -209,13 +236,25 @@ class Recorder:
         return time.time() - self._t0 if self._proc else 0.0
 
     def start(self, out: Path, source: str = "") -> None:
-        cmd = ["pw-record", "--rate", "24000", "--channels", "1", "--format", "s16"]
-        if source:
-            cmd += ["--target", source]
-        cmd.append(str(out))
+        stdin = None
+        if sys.platform.startswith("linux"):
+            cmd = ["pw-record", "--rate", "24000", "--channels", "1", "--format", "s16"]
+            if source:
+                cmd += ["--target", source]
+            cmd.append(str(out))
+        else:  # ffmpeg: si ferma scrivendo «q» sul suo input
+            if not source:
+                found = _ffmpeg_audio_sources()
+                if not found:
+                    raise RuntimeError("Non trovo nessun microfono.")
+                source = found[0][0]
+            fmt = ["-f", "dshow", "-i", f"audio={source}"] if sys.platform == "win32" else ["-f", "avfoundation", "-i", f":{source}"]
+            cmd = [paths.tool("ffmpeg"), "-y", "-loglevel", "error", *fmt, "-ar", "24000", "-ac", "1", str(out)]
+            stdin = subprocess.PIPE
         self._out = out
         self._t0 = time.time()
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self._proc = subprocess.Popen(cmd, stdin=stdin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      start_new_session=sys.platform != "win32")
 
     def stop(self) -> Path | None:
         """Ferma la registrazione; ritorna il file se contiene audio."""
@@ -223,9 +262,16 @@ class Recorder:
         self._proc = None
         if proc is None or out is None:
             return None
-        proc.send_signal(signal.SIGINT)  # pw-record chiude bene il WAV con Ctrl-C
+        if proc.stdin is not None:  # ffmpeg chiude bene il file se riceve «q»
+            try:
+                proc.stdin.write(b"q")
+                proc.stdin.flush()
+            except OSError:
+                pass
+        else:
+            proc.send_signal(signal.SIGINT)  # pw-record chiude bene il WAV con Ctrl-C
         try:
-            proc.wait(timeout=4)
+            proc.wait(timeout=6)
         except subprocess.TimeoutExpired:
             proc.kill()
         return out if out.exists() and out.stat().st_size > 4000 else None

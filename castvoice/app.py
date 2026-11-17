@@ -4,6 +4,8 @@ from __future__ import annotations
 import locale
 import logging
 import math
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -986,9 +988,13 @@ class MainWindow(QMainWindow):
             self._stage_sig.stage.emit("play")
             if self._preview_proc and self._preview_proc.poll() is None:
                 self._preview_proc.terminate()  # una sola anteprima alla volta
-            self._preview_proc = subprocess.Popen(
-                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(audio)])
-            self._preview_proc.wait()
+            ffplay = paths.tool("ffplay")
+            if shutil.which(ffplay) or Path(ffplay).exists():
+                self._preview_proc = subprocess.Popen(
+                    [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", str(audio)])
+                self._preview_proc.wait()
+            else:  # senza ffplay lo apre il lettore audio del sistema
+                _open_with_system(audio)
             return True
 
         def done(played):
@@ -1206,7 +1212,7 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(14, 14, 14, 14)
         lay.addWidget(self._label(
-            "🔒 La tua voce resta solo su questo computer (cartella ~/.local/share/castvoice). "
+            f"🔒 La tua voce resta solo su questo computer (cartella {paths.DATA_DIR}). "
             "Non viene mai caricata online né inclusa nel progetto pubblico.", "note"))
         lay.addWidget(self._label("Profili voce clonata", "title"))
         self.profile_list = QListWidget()
@@ -1306,7 +1312,11 @@ class MainWindow(QMainWindow):
         proc.readyRead.connect(lambda: self._install_output(proc))
         proc.finished.connect(lambda code, _s: self._install_done(code))
         self.install_proc = proc
-        proc.start("bash", ["-lc", tts.CLONE_ENGINES[self._clone_engine()][3]])
+        cmd = tts.CLONE_ENGINES[self._clone_engine()][3]
+        if sys.platform == "win32":
+            proc.start("cmd", ["/c", cmd])
+        else:
+            proc.start("bash", ["-lc", cmd])
 
     def _install_output(self, proc: QProcess) -> None:
         lines = bytes(proc.readAll()).decode(errors="replace").strip().splitlines()
@@ -1383,7 +1393,45 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def _open_with_system(path: Path) -> None:
+    """Apre un file con il programma predefinito del sistema."""
+    if sys.platform == "win32":
+        os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+
+
+def selftest() -> int:
+    """Prova rapida (usata dalle build automatiche): l'app si costruisce e trova ciò che le serve."""
+    problems: list[str] = []
+    for name in ("ffmpeg", "ffprobe"):
+        try:
+            subprocess.run([paths.tool(name), "-version"], capture_output=True, check=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            problems.append(f"{name} non trovato")
+    for f in (tts.WORKER, tts.QWEN_WORKER, paths.ASSETS_DIR / "castvoice.svg"):
+        if not f.exists():
+            problems.append(f"manca {f.name}")
+    for mod in ("pychromecast", "zeroconf", "edge_tts"):
+        try:
+            __import__(mod)
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"{mod}: {exc}")
+    app = QApplication.instance() or QApplication(sys.argv)
+    win = MainWindow()
+    deadline = time.time() + 3
+    while time.time() < deadline:  # lascia girare l'interfaccia (timer, ricerca dispositivi)
+        app.processEvents()
+        time.sleep(0.02)
+    win.clone.close()
+    print(f"CastVoice {__import__('castvoice').__version__} · dati: {paths.DATA_DIR}")
+    print("SELFTEST " + ("OK" if not problems else "FALLITO: " + "; ".join(problems)))
+    return 0 if not problems else 1
+
+
 def run() -> int:
+    if "--selftest" in sys.argv:
+        return selftest()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     app = QApplication(sys.argv)
     locale.setlocale(locale.LC_TIME, "C")  # le date HTTP (usate da edge-tts) vanno lette in inglese

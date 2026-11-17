@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -91,7 +92,7 @@ def edge_voices() -> list[tuple[str, str, str, str]]:
 
 def list_voices(store: VoiceStore, online: bool = True) -> list[Voice]:
     voices = [Voice(f"espeak:{v}", f"{name} · italiano · locale", "espeak", name, "it", gender, "it-IT")
-              for v, name, gender in ESPEAK_VOICES]
+              for v, name, gender in ESPEAK_VOICES] if shutil.which("espeak-ng") else []  # solo se installato
     for p in store.profiles():
         voices.insert(0, Voice(f"clone:{p.slug}", f"La mia voce – {p.name} · clonata", "clone", p.name))
     if online:
@@ -114,11 +115,11 @@ _UV_CUDA = (
 CLONE_ENGINES = {
     "qwen": ("Qwen3-TTS 1.7B", paths.CLONE_ENV_QWEN, QWEN_WORKER,
              f'uv venv --python 3.12 "{paths.CLONE_ENV_QWEN}" && '
-             f'uv pip install --python "{paths.CLONE_ENV_QWEN}/bin/python" {_UV_CUDA}'
+             f'uv pip install --python "{paths.env_python(paths.CLONE_ENV_QWEN)}" {_UV_CUDA}'
              "qwen-tts torch torchaudio soundfile huggingface_hub"),
     "xtts": ("XTTS v2", paths.CLONE_ENV, WORKER,
              f'uv venv --python 3.12 "{paths.CLONE_ENV}" && '
-             f'uv pip install --python "{paths.CLONE_ENV}/bin/python" {_UV_CUDA}'
+             f'uv pip install --python "{paths.env_python(paths.CLONE_ENV)}" {_UV_CUDA}'
              '"coqui-tts[codec]" six torch torchaudio'),
 }
 DEFAULT_CLONE_ENGINE = "qwen"
@@ -150,7 +151,7 @@ class CloneEngine:
 
     @staticmethod
     def engine_installed(engine: str) -> bool:
-        return (CLONE_ENGINES[engine][1] / "bin" / "python").exists()
+        return paths.env_python(CLONE_ENGINES[engine][1]).exists()
 
     @staticmethod
     def qwen_installed() -> bool:
@@ -174,7 +175,7 @@ class CloneEngine:
         self._notify("load")
         t0 = time.monotonic()
         self._proc = subprocess.Popen(
-            [str(env_dir / "bin" / "python"), str(worker)],
+            [str(paths.env_python(env_dir)), str(worker)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, env=env, start_new_session=True,
         )
@@ -240,7 +241,7 @@ def join_audio(parts: list[Path], gap: float = 0.18) -> Path:
         return parts[0]
     paths.ensure_dirs()
     out = paths.CACHE_DIR / f"{uuid.uuid4().hex}.wav"
-    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    cmd = [paths.tool("ffmpeg"), "-y", "-loglevel", "error"]
     for p in parts:
         cmd += ["-i", str(p)]
     chains = [

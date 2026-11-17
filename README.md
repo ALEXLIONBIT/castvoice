@@ -6,14 +6,29 @@
 
 ![CastVoice icon](assets/castvoice.svg)
 
+## Scarica · Download
+
+Vai alla pagina **[Releases](https://github.com/ALEXLIONBIT/castvoice/releases/latest)** e prendi il file per il tuo sistema, senza installare altro (ffmpeg è incluso):
+
+| Sistema | File |
+|---|---|
+| 🐧 **Linux** (x86_64) | `.AppImage`: rendilo eseguibile e doppio clic |
+| 🪟 **Windows** (64 bit) | `.zip`: estrai e apri `CastVoice.exe` |
+| 🍎 **macOS** (Apple Silicon) | `.zip`: estrai e apri `CastVoice.app` (la prima volta: tasto destro → Apri) |
+| 🤖 **Android** | `.apk`: copialo sul telefono e consenti «installa app sconosciute» |
+
+Windows e macOS non sono firmati, quindi il sistema può mostrare un avviso. Le build per Windows e macOS sono prodotte automaticamente da GitHub Actions. *Pick the file for your system from the latest release; no extra install needed.* Licenze dei componenti inclusi: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 ## Funzioni · Features
+
+- 🗣 **Più voci nello stesso messaggio**: scegli una voce, scrivi, cambia voce e continua; **Alt+1…Alt+9** (o i pulsanti colorati) cambiano voce al volo · several voices in one message, switch with Alt+1…9
 
 - 🔎 **Trova da sola** i Google Nest, Chromecast e gruppi sulla rete locale · finds speakers on your LAN
 - 🔈 **Volume** per ogni dispositivo, selezione multipla · per-device volume, multi-select
 - 💬 **Parla**: scrivi un testo e scegli la voce · type text, pick a voice
   - voci locali (`espeak-ng`), senza internet · offline voices
   - voci neurali online (Microsoft Edge TTS: italiano, inglese, spagnolo, francese, tedesco, portoghese) · online neural voices
-  - **la tua voce clonata** (XTTS v2, sulla tua GPU) · **your own cloned voice**
+  - **la tua voce clonata** (Qwen3-TTS, licenza Apache-2.0, oppure XTTS v2; sulla tua GPU, scelta dalla scheda «La mia voce») · **your own cloned voice**
   - velocità regolabile e **frasi rapide** salvate · speed control and saved quick phrases
   - **scelta voce organizzata** (oltre 130 voci): filtri per tipo e lingua, ricerca per nome/uomo/donna, ★ preferite e **🔊 anteprima sul PC** (doppio clic) prima di mandarla ai Google · organised voice picker with filters, search, favourites and local preview
 - 🎵 **Audio**: trascina i tuoi file (mp3, wav, ogg, flac, m4a…) e riproducili sui Google · drag & drop your files
