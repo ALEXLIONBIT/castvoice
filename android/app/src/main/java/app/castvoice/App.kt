@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var favorites by mutableStateOf(prefs.favorites); private set
     val phrases = mutableStateListOf<Phrase>().apply { addAll(prefs.phrases) }
     var busy by mutableStateOf(false); private set
+    var progress by mutableFloatStateOf(0f); private set      // 0..1 mentre prepara la voce
+    private var speakGen = 0                                  // cambia con ⏹ Ferma: la preparazione in corso non parla più
+    /** Il messaggio in scrittura: ogni parte ha la sua voce. */
+    val parts = mutableStateListOf(Part(prefs.voice, ""))
+    var recents by mutableStateOf(prefs.recents); private set
     var previewingId by mutableStateOf<String?>(null); private set
     var recording by mutableStateOf(false); private set
     var recordSeconds by mutableIntStateOf(0); private set
@@ -56,8 +62,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun say(msg: String) { cast.status = msg }
 
     private fun work(start: String, block: suspend () -> Unit) {
+        busy = true // subito, così un secondo tocco mentre parte non avvia un secondo lavoro
         viewModelScope.launch(Dispatchers.IO) {
-            busy = true
             say(start)
             try {
                 block()
@@ -85,7 +91,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun chooseVoice(id: String) { voiceId = id; prefs.voice = id }
+    fun chooseVoice(id: String) {
+        voiceId = id
+        prefs.voice = id
+        if (parts.size == 1 && parts[0].voice.isBlank()) parts[0] = parts[0].copy(voice = id)
+    }
+
+    private fun useVoice(id: String) {
+        recents = (listOf(id) + recents.filter { it != id }).take(6)
+        prefs.recents = recents
+        voiceId = id
+        prefs.voice = id
+    }
+
+    // ------------------------------------------------------------------ messaggio a più voci
+    fun editPart(i: Int, text: String) { if (i in parts.indices) parts[i] = parts[i].copy(text = text) }
+
+    fun setPartVoice(i: Int, id: String) {
+        if (i in parts.indices) parts[i] = parts[i].copy(voice = id)
+        useVoice(id)
+    }
+
+    /** Scorciatoia: continua a scrivere con un'altra voce (usa l'ultima parte se è ancora vuota). */
+    fun continueWith(id: String) {
+        val last = parts.lastIndex
+        if (parts[last].text.isBlank()) parts[last] = parts[last].copy(voice = id) else parts += Part(id, "")
+        useVoice(id)
+    }
+
+    fun addPart() { parts += Part(parts.last().voice.ifBlank { voiceId }, "") }
+
+    fun removePart(i: Int) {
+        if (parts.size > 1 && i in parts.indices) parts.removeAt(i)
+    }
+
+    fun setParts(newParts: List<Part>) {
+        parts.clear()
+        parts.addAll(newParts.ifEmpty { listOf(Part(voiceId, "")) })
+    }
     fun changeRate(v: Int) { rate = v; prefs.rate = v }
 
     fun toggleFavorite(id: String) {
@@ -110,21 +153,41 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------------ parlare
-    fun speak(text: String, voice: String = voiceId) {
-        val t = text.trim()
-        if (t.isEmpty()) { say("Scrivi qualcosa da dire."); return }
+    /** Fa dire il messaggio: ogni parte con la sua voce, tutto in un solo audio. */
+    fun speak(msg: List<Part> = parts.toList()) {
+        if (busy) { say("Sto ancora preparando la voce: aspetta che finisca (o premi ⏹ Ferma)."); return }
+        val segs = msg.map { Part(it.voice.ifBlank { voiceId }, it.text.trim()) }.filter { it.text.isNotEmpty() }
+        if (segs.isEmpty()) { say("Scrivi qualcosa da dire."); return }
         if (cast.selectedId == null) { say("Scegli prima un dispositivo."); return }
+        val gen = ++speakGen
+        progress = 0f
         work("Preparo la voce…") {
-            val (file, mime) = Tts.synthesize(localTts, voice, t, rate, audioDir)
-            val url = server.publish(fileSource(file, mime), "wav") ?: error(NO_WIFI)
-            withContext(Dispatchers.Main) { cast.play(url, mime, t.take(40)) }
+            val files = ArrayList<File>()
+            try {
+                segs.forEachIndexed { i, p ->
+                    say(if (segs.size > 1) "Preparo la voce… (parte ${i + 1} di ${segs.size})" else "Preparo la voce…")
+                    files += Tts.synthesize(localTts, p.voice, p.text, rate, audioDir).first
+                    if (gen != speakGen) { say("Annullato: non ho inviato nulla."); return@work }
+                    progress = (i + 1f) / (segs.size + 1)
+                }
+                val file = if (files.size == 1) files[0] else
+                    File(audioDir, UUID.randomUUID().toString().replace("-", "") + ".wav").also { WavJoin.join(files, it) }
+                val url = server.publish(fileSource(file, "audio/wav"), "wav") ?: error(NO_WIFI)
+                progress = 1f
+                withContext(Dispatchers.Main) { cast.play(url, "audio/wav", segs.first().text.take(40)) }
+            } finally {
+                if (files.size > 1) files.forEach { it.delete() }
+            }
         }
     }
 
-    fun savePhrase(text: String) {
-        val t = text.trim()
-        if (t.isEmpty() || phrases.any { it.text == t && it.voice == voiceId }) return
-        phrases += Phrase(t, voiceId)
+    fun savePhrase() {
+        val segs = parts.map { Part(it.voice.ifBlank { voiceId }, it.text.trim()) }.filter { it.text.isNotEmpty() }
+        if (segs.isEmpty()) return
+        val text = segs.joinToString(" ") { it.text }
+        val multi = if (segs.size > 1) segs else emptyList()
+        if (phrases.any { it.text == text && it.parts == multi && it.voice == segs.first().voice }) return
+        phrases += Phrase(text, segs.first().voice, multi)
         prefs.phrases = phrases.toList()
     }
 
@@ -161,6 +224,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun remove(item: Item) = library.remove(item)
 
     fun stopAll() {
+        if (busy) speakGen++ // se sta ancora preparando la voce, la annulla: non parlerà
         cast.stopPlayback()
         player.stop()
         previewingId = null

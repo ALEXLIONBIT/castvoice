@@ -18,8 +18,11 @@ import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 
-/** Frase rapida salvata: testo + voce con cui dirla. */
-data class Phrase(val text: String, val voice: String)
+/** Un pezzo di messaggio: il testo e la voce che lo dice. */
+data class Part(val voice: String, val text: String)
+
+/** Frase rapida salvata: testo + voce con cui dirla; [parts] se ha più voci (altrimenti è vuoto). */
+data class Phrase(val text: String, val voice: String, val parts: List<Part> = emptyList())
 
 /** Impostazioni (voce scelta, velocità, preferite, frasi rapide). Tutto resta sul telefono. */
 class Prefs(context: Context) {
@@ -40,13 +43,31 @@ class Prefs(context: Context) {
     var phrases: List<Phrase>
         get() = runCatching {
             val a = JSONArray(sp.getString("phrases", "[]"))
-            (0 until a.length()).map { a.getJSONObject(it).let { o -> Phrase(o.getString("text"), o.getString("voice")) } }
+            (0 until a.length()).map {
+                a.getJSONObject(it).let { o ->
+                    val parts = o.optJSONArray("parts")?.let { arr ->
+                        (0 until arr.length()).map { i -> arr.getJSONObject(i).let { p -> Part(p.getString("voice"), p.getString("text")) } }
+                    } ?: emptyList()
+                    Phrase(o.getString("text"), o.getString("voice"), parts)
+                }
+            }
         }.getOrDefault(emptyList())
         set(v) {
             val a = JSONArray()
-            v.forEach { a.put(JSONObject().put("text", it.text).put("voice", it.voice)) }
+            v.forEach { ph ->
+                val o = JSONObject().put("text", ph.text).put("voice", ph.voice)
+                if (ph.parts.isNotEmpty()) {
+                    o.put("parts", JSONArray().also { arr -> ph.parts.forEach { arr.put(JSONObject().put("voice", it.voice).put("text", it.text)) } })
+                }
+                a.put(o)
+            }
             sp.edit().putString("phrases", a.toString()).apply()
         }
+
+    /** Ultime voci usate (le più recenti per prime): diventano scorciatoie nella schermata Parla. */
+    var recents: List<String>
+        get() = (sp.getString("recents", "") ?: "").split("\n").filter { it.isNotBlank() }
+        set(v) { sp.edit().putString("recents", v.joinToString("\n")).apply() }
 }
 
 /** Un audio nella libreria: "file" = scelto dall'utente (resta dov'è), "clip" = registrato qui (privato). */

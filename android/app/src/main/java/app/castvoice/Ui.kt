@@ -17,7 +17,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -147,42 +153,75 @@ private fun DevicePanel(vm: AppViewModel) {
 // ============================================================================ PARLA
 @Composable
 private fun SpeakTab(vm: AppViewModel) {
-    var text by rememberSaveable { mutableStateOf("") }
-    var picker by rememberSaveable { mutableStateOf(false) }
-    val current = vm.voices.firstOrNull { it.id == vm.voiceId }
+    var pickerFor by rememberSaveable { mutableIntStateOf(-1) } // indice della parte di cui si sceglie la voce
+    val parts = vm.parts
+    val quick = remember(vm.voices, vm.favorites, vm.recents) {
+        (vm.voices.filter { it.id in vm.favorites } + vm.recents.mapNotNull { id -> vm.voices.firstOrNull { it.id == id } })
+            .distinctBy { it.id }.take(9)
+    }
+    val quickIds = quick.map { it.id }
+    val lastFocus = remember { FocusRequester() }
+    LaunchedEffect(parts.size) { if (parts.size > 1) runCatching { lastFocus.requestFocus() } }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedTextField(
-            value = text, onValueChange = { text = it },
-            label = { Text("Cosa vuoi dire?") },
-            minLines = 4, maxLines = 8, modifier = Modifier.fillMaxWidth(),
+        Text(
+            "Scrivi una parte, poi tocca un'altra voce e continua: nello stesso messaggio parleranno voci diverse.",
+            fontSize = 12.sp, color = muted,
         )
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.fillMaxWidth().clickable { picker = true },
-        ) {
-            Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Voce", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        if (current == null) "Nessuna voce" else
-                            (if (current.online) "🌐 " else "💻 ") + current.title + " · ${langName(current.lang)}" +
-                                (if (current.note.isNotEmpty()) " · ${current.note}" else ""),
-                        fontWeight = FontWeight.Medium,
+        if (quick.isNotEmpty()) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                quick.forEachIndexed { i, v ->
+                    FilterChip(
+                        selected = parts.lastOrNull()?.voice == v.id,
+                        onClick = { vm.continueWith(v.id) },
+                        label = { Text("${i + 1} · ${v.title}") },
+                        leadingIcon = { Box(Modifier.size(10.dp).background(partColor(v.id, quickIds), CircleShape)) },
                     )
                 }
-                Text("Cambia ▸", color = MaterialTheme.colorScheme.primary)
+            }
+        } else {
+            Text("Scorciatoie: segna delle voci con ★ nella lista (o usale) e compariranno qui.", fontSize = 12.sp, color = muted)
+        }
+        parts.forEachIndexed { i, p ->
+            val v = vm.voices.firstOrNull { it.id == p.voice }
+            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth().clickable { pickerFor = i }, verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(12.dp).background(partColor(p.voice, quickIds), CircleShape))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(if (parts.size > 1) "Parte ${i + 1}" else "Voce", fontSize = 12.sp, color = muted)
+                            Text(voiceLabel(v), fontWeight = FontWeight.Medium)
+                        }
+                        Text("Cambia ▸", color = MaterialTheme.colorScheme.primary)
+                        if (parts.size > 1) TextButton(onClick = { vm.removePart(i) }) { Text("✕") }
+                    }
+                    OutlinedTextField(
+                        value = p.text, onValueChange = { vm.editPart(i, it) },
+                        label = { Text(if (i == 0) "Cosa vuoi dire?" else "…e poi?") },
+                        minLines = if (parts.size > 1) 2 else 4, maxLines = 8,
+                        modifier = Modifier.fillMaxWidth().then(if (i == parts.lastIndex) Modifier.focusRequester(lastFocus) else Modifier),
+                    )
+                }
             }
         }
+        OutlinedButton(onClick = { vm.addPart() }, modifier = Modifier.fillMaxWidth()) { Text("＋ Aggiungi una parte con un'altra voce") }
         Column {
             Text("Velocità: ${if (vm.rate >= 0) "+" else ""}${vm.rate}%", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Slider(value = vm.rate.toFloat(), onValueChange = { vm.changeRate(it.roundToInt()) }, valueRange = -50f..50f)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { vm.speak(text) }, enabled = !vm.busy, modifier = Modifier.weight(1f)) {
+            Button(onClick = { vm.speak() }, enabled = !vm.busy, modifier = Modifier.weight(1f)) {
                 Text(if (vm.busy) "…" else "▶ Parla")
             }
-            OutlinedButton(onClick = { vm.savePhrase(text) }) { Text("💾 Salva") }
+            OutlinedButton(onClick = { vm.savePhrase() }) { Text("💾 Salva") }
+        }
+        if (vm.busy) {
+            Column {
+                LinearProgressIndicator(progress = { vm.progress }, modifier = Modifier.fillMaxWidth())
+                Text("${(vm.progress * 100).roundToInt()}% · ⏹ Ferma annulla", fontSize = 12.sp, color = muted)
+            }
         }
 
         if (vm.phrases.isNotEmpty()) {
@@ -190,7 +229,13 @@ private fun SpeakTab(vm: AppViewModel) {
             Text("Frasi rapide", fontWeight = FontWeight.Medium)
             vm.phrases.toList().forEach { p ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { vm.speak(p.text, p.voice) }, modifier = Modifier.weight(1f)) {
+                    TextButton(
+                        onClick = {
+                            if (!vm.busy) vm.setParts(p.parts.ifEmpty { listOf(Part(p.voice, p.text)) })
+                            vm.speak()
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Text("▶ ${p.text}", maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
                     }
                     TextButton(onClick = { vm.deletePhrase(p) }) { Text("✕") }
@@ -198,11 +243,30 @@ private fun SpeakTab(vm: AppViewModel) {
             }
         }
     }
-    if (picker) VoicePicker(vm) { picker = false }
+    if (pickerFor >= 0) {
+        VoicePicker(vm, selectedId = parts.getOrNull(pickerFor)?.voice ?: vm.voiceId, onPick = { vm.setPartVoice(pickerFor, it.id) }) {
+            pickerFor = -1
+        }
+    }
 }
 
+private val PartColors = listOf(
+    Color(0xFF22D3EE), Color(0xFFF59E0B), Color(0xFFA78BFA), Color(0xFF34D399), Color(0xFFF472B6),
+    Color(0xFF60A5FA), Color(0xFFFB7185), Color(0xFFA3E635), Color(0xFFFBBF24),
+)
+
+/** Colore stabile di una voce: segue la posizione tra le scorciatoie, altrimenti l'id. */
+private fun partColor(voiceId: String, order: List<String>): Color {
+    val i = order.indexOf(voiceId)
+    return PartColors[if (i >= 0) i % PartColors.size else kotlin.math.abs(voiceId.hashCode()) % PartColors.size]
+}
+
+private fun voiceLabel(v: Voice?): String =
+    if (v == null) "Nessuna voce" else
+        (if (v.online) "🌐 " else "💻 ") + v.title + " · ${langName(v.lang)}" + (if (v.note.isNotEmpty()) " · ${v.note}" else "")
+
 @Composable
-private fun VoicePicker(vm: AppViewModel, onClose: () -> Unit) {
+private fun VoicePicker(vm: AppViewModel, selectedId: String, onPick: (Voice) -> Unit, onClose: () -> Unit) {
     var type by rememberSaveable { mutableStateOf("all") }
     var query by rememberSaveable { mutableStateOf("") }
     val langs = remember(vm.voices) { vm.voices.map { it.lang }.distinct().sortedWith(compareBy({ it != "it" }, { it })) }
@@ -245,11 +309,11 @@ private fun VoicePicker(vm: AppViewModel, onClose: () -> Unit) {
                 )
                 LazyColumn(Modifier.weight(1f)) {
                     items(shown, key = { it.id }) { v ->
-                        val selected = v.id == vm.voiceId
+                        val selected = v.id == selectedId
                         Row(
                             Modifier.fillMaxWidth()
                                 .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
-                                .clickable { vm.chooseVoice(v.id); onClose() }
+                                .clickable { onPick(v); onClose() }
                                 .padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
