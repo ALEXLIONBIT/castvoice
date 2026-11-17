@@ -14,13 +14,16 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-22.04, name: linux }     # glibc vecchia: l'AppImage gira anche su distribuzioni non recenti
           - { os: windows-latest, name: windows }
-          - { os: macos-latest, name: macos }     # Apple Silicon (arm64)
+          - { os: macos-latest, name: macos-arm64 }     # Apple Silicon
+          - { os: macos-15-intel, name: macos-intel }   # Mac con processore Intel
     steps:
       - uses: actions/checkout@v4
 

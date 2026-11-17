@@ -135,6 +135,9 @@ def make_appimage(dist: Path) -> Path:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):  # la console di Windows (cp1252) non sa scrivere «→», «·»…
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     BUILD.mkdir(exist_ok=True)
     OUT.mkdir(exist_ok=True)
     binp = fetch_ffmpeg()
