@@ -1424,8 +1424,15 @@ def selftest() -> int:
         app.processEvents()
         time.sleep(0.02)
     win.clone.close()
-    print(f"CastVoice {__import__('castvoice').__version__} · dati: {paths.DATA_DIR}")
-    print("SELFTEST " + ("OK" if not problems else "FALLITO: " + "; ".join(problems)))
+    report = (f"CastVoice {__import__('castvoice').__version__} - dati: {paths.DATA_DIR}\n"
+              "SELFTEST " + ("OK" if not problems else "FALLITO: " + "; ".join(problems)))
+    out = os.environ.get("CASTVOICE_SELFTEST_FILE")  # su Windows l'app senza console non ha stdout
+    if out:
+        Path(out).write_text(report, encoding="utf-8")
+    try:
+        print(report)
+    except (OSError, UnicodeError):
+        pass
     return 0 if not problems else 1
 
 

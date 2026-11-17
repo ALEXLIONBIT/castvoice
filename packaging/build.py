@@ -101,11 +101,14 @@ def run_pyinstaller(binp: Path) -> Path:
 
 def selftest(cmd: list[str]) -> None:
     """Avvia l'app impacchettata con --selftest: deve costruirsi, trovare ffmpeg e i file inclusi."""
-    env = {**os.environ, "CASTVOICE_DATA": str(BUILD / "selftest-data")}
+    result = BUILD / "selftest-result.txt"
+    result.unlink(missing_ok=True)
+    env = {**os.environ, "CASTVOICE_DATA": str(BUILD / "selftest-data"), "CASTVOICE_SELFTEST_FILE": str(result)}
     env.setdefault("QT_QPA_PLATFORM", "offscreen")  # prova senza finestra, valida anche sui server di build
-    r = subprocess.run(cmd + ["--selftest"], env=env, capture_output=True, text=True, timeout=180)
-    print(r.stdout, r.stderr[-1500:])
-    if r.returncode != 0 or "SELFTEST OK" not in r.stdout:
+    r = subprocess.run(cmd + ["--selftest"], env=env, capture_output=True, text=True, timeout=240)
+    report = result.read_text(encoding="utf-8") if result.exists() else "(nessun risultato scritto)"
+    print(report, "\n", (r.stderr or "")[-1500:])
+    if r.returncode != 0 or "SELFTEST OK" not in report:
         sys.exit(f"Prova dell'app impacchettata FALLITA (codice {r.returncode})")
 
 
