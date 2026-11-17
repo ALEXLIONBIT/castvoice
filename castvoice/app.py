@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import locale
 import logging
+import math
 import subprocess
 import sys
 import time
@@ -11,14 +12,16 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from . import paths, tts
 from .engine import Device, Player, discover, prepare_audio
 from .library import Library, Recorder, Settings, VoiceStore, audio_sources
+from .script_edit import ScriptEdit, voice_color
 
 log = logging.getLogger("castvoice")
 
@@ -78,6 +81,11 @@ QStatusBar { background: #0b0f19; color: #8a94a8; }
 class _Signals(QObject):
     done = Signal(object)
     failed = Signal(str)
+
+
+class _StageSignal(QObject):
+    """Fasi della preparazione della voce, emesse dai thread di lavoro verso l'interfaccia."""
+    stage = Signal(str)  # "load" | "synth" | "send" | "play"
 
 
 class Task(QRunnable):
@@ -516,13 +524,24 @@ class MainWindow(QMainWindow):
         self.library = Library()
         self.store = VoiceStore()
         self.player = Player()
-        self.clone = tts.CloneEngine(lambda: bool(self.settings.get("xtts_license_accepted")))
+        self.clone = tts.CloneEngine(lambda: bool(self.settings.get("xtts_license_accepted")),
+                                     lambda: self.settings.get("clone_engine"))
         self.pool = QThreadPool.globalInstance()
         self._tasks: set[Task] = set()
         self.voices: list[tts.Voice] = []
         self.install_proc: QProcess | None = None
         self._busy = 0
         self._preview_proc: subprocess.Popen | None = None
+        self._slot_buttons: list = []  # [(id voce, pulsante)] delle scorciatoie Alt+numero
+        self._synth_busy = False   # una sola preparazione di voce alla volta (niente clic accumulati)
+        self._speak_gen = 0        # cambia quando si annulla: il lavoro in corso non parla più
+        self._prog: dict | None = None
+        self._stage_sig = _StageSignal()
+        self._stage_sig.stage.connect(self._on_stage)
+        self.clone.on_stage = self._stage_sig.stage.emit
+        self._prog_timer = QTimer(self)
+        self._prog_timer.setInterval(100)
+        self._prog_timer.timeout.connect(self._tick_progress)
 
         self.panel = DevicePanel()
         self.panel.refresh_requested.connect(self.refresh_devices)
@@ -533,6 +552,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_speak_tab(), "💬  Parla")
         self.tabs.addTab(self._build_audio_tab(), "🎵  Audio")
         self.tabs.addTab(self._build_voice_tab(), "🎙  La mia voce")
+        self.tabs.currentChanged.connect(lambda _i: self._rebuild_slots())  # così le ★ preferite sono aggiornate
 
         left = QFrame()
         left.setObjectName("panel")
@@ -644,12 +664,18 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(14, 14, 14, 14)
         lay.addWidget(self._label("Cosa vuoi far dire?", "title"))
-        self.text = QPlainTextEdit()
-        self.text.setPlaceholderText("Scrivi qui il messaggio… (Ctrl+Invio per inviarlo)")
-        self.text.setFixedHeight(84)
+        self.text = ScriptEdit()
+        self.text.setPlaceholderText(
+            "Scrivi qui il messaggio… (Ctrl+Invio per inviarlo). Per far parlare più voci nello stesso "
+            "messaggio scegli una voce qui sotto (o Alt+1, Alt+2…) e continua a scrivere.")
+        self.text.setFixedHeight(110)
+        self.text.voice_changed.connect(self._update_chips)
         lay.addWidget(self.text)
-        lay.addWidget(self._label("Scegli la voce", "title"))
+        self.slot_grid = QGridLayout()
+        self.slot_grid.setSpacing(6)
+        lay.addLayout(self.slot_grid)
         self.voice_picker = VoicePicker(self.settings)
+        lay.addWidget(self._label("Scegli la voce", "title"))
         self.voice_picker.changed.connect(self._voice_changed)
         self.voice_picker.preview_requested.connect(self.preview_voice)
         lay.addWidget(self.voice_picker, 3)
@@ -678,6 +704,15 @@ class MainWindow(QMainWindow):
         btns.addWidget(save)
         btns.addWidget(stop)
         lay.addLayout(btns)
+        self.progress_label = self._label("", "muted")
+        self.progress_label.hide()
+        lay.addWidget(self.progress_label)
+        self.speak_progress = QProgressBar()
+        self.speak_progress.setRange(0, 100)
+        self.speak_progress.setFormat("%p%")
+        self.speak_progress.setToolTip("Percentuale stimata in base ai tempi delle volte precedenti")
+        self.speak_progress.hide()
+        lay.addWidget(self.speak_progress)
         lay.addWidget(self._label("Frasi rapide (doppio clic per dirle)", "title"))
         self.phrase_list = QListWidget()
         self.phrase_list.itemDoubleClicked.connect(self._phrase_activated)
@@ -687,6 +722,8 @@ class MainWindow(QMainWindow):
         rm.clicked.connect(self.delete_phrase)
         lay.addWidget(rm, 0, Qt.AlignRight)
         QShortcut(QKeySequence("Ctrl+Return"), self.text, activated=self.speak)
+        for n in range(1, 10):  # Alt+1…Alt+9: cambia voce al volo
+            QShortcut(QKeySequence(f"Alt+{n}"), self, activated=lambda n=n: self.use_slot(n - 1))
         return w
 
     @staticmethod
@@ -707,67 +744,320 @@ class MainWindow(QMainWindow):
 
     def _populate_voice_combo(self) -> None:
         self.voice_picker.set_voices(self.voices)
+        self._rebuild_slots()
 
     def _voice_changed(self, voice_id: str) -> None:
         self.settings.set("voice", voice_id)
+        self.text.set_voice(voice_id, to_selection=False)  # scegliendo dalla lista si scrive con questa voce
+        self._update_chips(voice_id)
+
+    # ---- voci su Alt+1…Alt+9 ----------------------------------------------
+    def _slot_ids(self) -> list[str]:
+        explicit = self.settings.get("voice_slots")
+        if explicit is None:  # automatico: prima le voci clonate, poi le preferite
+            ids = [f"clone:{p.slug}" for p in self.store.profiles()] + list(self.settings.get("favorite_voices") or [])
+        else:
+            ids = list(explicit)
+        clones = {p.slug for p in self.store.profiles()}
+        out: list[str] = []
+        for v in ids:
+            if v and v not in out and not (v.startswith("clone:") and v[6:] not in clones):
+                out.append(v)
+        return out[:9]
+
+    def _voice_name(self, voice_id: str) -> str:
+        v = next((v for v in self.voices if v.id == voice_id), None)
+        if v is None:
+            return voice_id.split(":", 1)[-1][:20]
+        name = v.name if v.engine == "clone" and v.name else v.label
+        return name if len(name) <= 20 else name[:19] + "…"
+
+    def _rebuild_slots(self) -> None:
+        while self.slot_grid.count():
+            item = self.slot_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        ids = self._slot_ids()
+        self._slot_buttons = []
+        for i, vid in enumerate(ids):
+            col = voice_color(vid, ids)
+            b = QPushButton(f"Alt+{i + 1}  {self._voice_name(vid)}")
+            b.setCheckable(True)
+            b.setStyleSheet(
+                f"QPushButton {{ border: 2px solid {col}; padding: 5px 10px; }}"
+                f"QPushButton:checked {{ background: {col}; color: #06222a; font-weight: 700; }}")
+            b.setToolTip(f"Clic o Alt+{i + 1}: scrivi con questa voce. Tasto destro: toglila.")
+            b.clicked.connect(lambda _c=False, i=i: self.use_slot(i))
+            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.customContextMenuRequested.connect(lambda pos, i=i, b=b: self._slot_menu(i, b.mapToGlobal(pos)))
+            self.slot_grid.addWidget(b, i // 3, i % 3)
+            self._slot_buttons.append((vid, b))
+        if len(ids) < 9:
+            add = QPushButton("＋ Aggiungi la voce scelta")
+            add.setToolTip("Mette sulla prossima scorciatoia Alt+numero la voce selezionata nella lista qui sotto.")
+            add.clicked.connect(self._add_slot)
+            self.slot_grid.addWidget(add, len(ids) // 3, len(ids) % 3)
+        if ids != self.text.order:  # i colori seguono la posizione: riapplicali solo se è cambiata
+            self.text.order = ids
+            self.text.recolor()
+        self._update_chips(self.text.current_voice())
+
+    def _update_chips(self, voice_id: str = "") -> None:
+        for vid, b in getattr(self, "_slot_buttons", []):
+            b.setChecked(vid == voice_id)
+
+    def use_slot(self, i: int) -> None:
+        ids = [v for v, _b in self._slot_buttons]
+        if i >= len(ids):
+            self.msg(f"Alt+{i + 1}: nessuna voce assegnata. Usa «＋ Aggiungi la voce scelta».", error=True)
+            return
+        self.tabs.setCurrentIndex(0)  # scheda Parla
+        self.text.set_voice(ids[i])
+        self._update_chips(ids[i])
+        self.text.setFocus()
+        self.msg(f"Da qui scrivi con la voce: {self._voice_name(ids[i])}")
+
+    def _add_slot(self) -> None:
+        vid, ids = self.voice_picker.current_id(), self._slot_ids()
+        if not vid or vid in ids:
+            self.msg("Questa voce è già tra le scorciatoie (o non ne hai scelta una).", error=True)
+            return
+        self.settings.set("voice_slots", ids + [vid])
+        self._rebuild_slots()
+
+    def _slot_menu(self, i: int, pos) -> None:
+        menu = QMenu(self)
+        remove = menu.addAction("Togli dalle scorciatoie")
+        if menu.exec(pos) is remove:
+            ids = self._slot_ids()
+            del ids[i]
+            self.settings.set("voice_slots", ids)
+            self._rebuild_slots()
+
+    # ---- avanzamento della preparazione della voce ------------------------
+    _STAGE_TEXT = {
+        "load": "Carico il modello vocale (ci mette un po', poi resta pronto)…",
+        "send": "Invio ai dispositivi…",
+        "play": "Riproduco l'anteprima…",
+    }
+    _BUSY_MSG = "Sto ancora preparando la voce: aspetta che finisca (o premi ■ Ferma)."
+
+    def _stage_label(self, name: str, parts: int) -> str:
+        if name.startswith("part"):
+            i = int(name[4:])
+            return f"Genero la voce… (parte {i + 1} di {parts})" if parts > 1 else "Genero la voce…"
+        return self._STAGE_TEXT[name]
+
+    def _begin_synth(self, segs: list[tuple[str, str]]) -> dict:
+        """Segna l'inizio di una preparazione e mostra la barra. Ritorna lo stato della richiesta."""
+        self._synth_busy = True
+        self._speak_gen += 1
+        timing = self.settings.get("timing") or {}
+        per_char = float(timing.get("synth_per_char", 0.1))
+        plan: list[list] = []  # [fase, secondi previsti]
+        if any(v.startswith("clone:") for v, _t in segs) and self.clone.needs_load():
+            plan.append(["load", float(timing.get("load", 45.0))])
+        for i, (v, t) in enumerate(segs):
+            plan.append([f"part{i}", max(2.0, per_char * len(t)) if v.startswith("clone:") else 2.5])
+        plan.append(["send", 2.0])
+        self._prog = {"gen": self._speak_gen, "plan": plan, "idx": 0, "t": time.monotonic(), "parts": len(segs),
+                      "load": 0.0, "clone_secs": 0.0, "clone_chars": 0, "cancelled": False}
+        self.speak_progress.setRange(0, 100)
+        self.speak_progress.setValue(0)
+        self.speak_progress.show()
+        self.progress_label.show()
+        self._tick_progress()
+        self._prog_timer.start()
+        return self._prog
+
+    def _synth_parts(self, prog: dict, gen: int, segs: list[tuple[str, str]], rate: int, lang: str) -> Path | None:
+        """Fa dire ogni pezzo con la sua voce e li unisce in un unico audio. None = annullato con ■ Ferma."""
+        parts = []
+        for i, (voice_id, text) in enumerate(segs):
+            self._stage_sig.stage.emit(f"part{i}")
+            t0 = time.monotonic()
+            parts.append(tts.synthesize(voice_id, text, self.store, self.clone, rate, lang))
+            if voice_id.startswith("clone:"):  # tempi veri, per stimare meglio la barra la prossima volta
+                load = self.clone.timing.pop("load", 0.0)
+                prog["load"] += load
+                prog["clone_secs"] += time.monotonic() - t0 - load
+                prog["clone_chars"] += len(text)
+            if gen != self._speak_gen:
+                return None
+        return tts.join_audio(parts)
+
+    def _on_stage(self, name: str) -> None:
+        p = self._prog
+        if p is None or p["cancelled"]:
+            return
+        if name == "play":  # anteprima: la voce è pronta e sta suonando
+            self._finish_progress(p["gen"])
+            return
+        names = [s[0] for s in p["plan"]]
+        if name == "load" and "load" not in names:  # il modello si è dovuto ricaricare all'improvviso
+            p["plan"].insert(0, ["load", float((self.settings.get("timing") or {}).get("load", 45.0))])
+            names.insert(0, "load")
+        if name in names:
+            p["idx"] = names.index(name)
+            p["t"] = time.monotonic()
+
+    def _tick_progress(self) -> None:
+        """Percentuale stimata: tempo trascorso rispetto ai tempi misurati le volte precedenti."""
+        p = self._prog
+        if p is None or p["cancelled"]:
+            return
+        plan, idx = p["plan"], p["idx"]
+        name, expected = plan[idx]
+        total = sum(s[1] for s in plan)
+        before = sum(s[1] for s in plan[:idx])
+        elapsed = time.monotonic() - p["t"]
+        # se ci mette più del previsto la barra rallenta senza mai arrivare a 100 prima della fine vera
+        frac = elapsed / expected if elapsed < 0.9 * expected else 0.9 + 0.1 * (1 - math.exp(-(elapsed - 0.9 * expected) / expected))
+        pct = min(99, int((before + frac * expected) / total * 100))
+        self.speak_progress.setValue(max(self.speak_progress.value(), pct))  # mai all'indietro
+        self.progress_label.setText(self._stage_label(name, p["parts"]))
+
+    def _learn_timing(self, p: dict) -> None:
+        """Salva i tempi veri di questa volta per rendere più precisa la percentuale della prossima."""
+        t = dict(self.settings.get("timing") or {})
+        self.clone.timing = {}
+
+        def blend(key: str, new: float) -> None:
+            t[key] = round(0.5 * t[key] + 0.5 * new, 2) if key in t else round(new, 2)
+
+        if p["load"] > 0:
+            blend("load", p["load"])
+        if p["clone_chars"] and p["clone_secs"] > 0:
+            blend("synth_per_char", p["clone_secs"] / p["clone_chars"])
+        self.settings.set("timing", t)
+
+    def _finish_progress(self, gen: int, learn: bool = True) -> None:
+        """Chiude la barra: preparazione finita, annullata o fallita. Si può chiamare più volte."""
+        p = self._prog
+        if p is None or p["gen"] != gen:
+            return
+        self._prog_timer.stop()
+        self._prog = None
+        self._synth_busy = False
+        if learn:
+            self._learn_timing(p)
+        self.speak_progress.setRange(0, 100)
+        if p["cancelled"] or not learn:
+            self._hide_progress()
+        else:
+            self.speak_progress.setValue(100)
+            QTimer.singleShot(700, self._hide_progress)
+
+    def _hide_progress(self) -> None:
+        if self._prog is None:  # se nel frattempo è partita un'altra richiesta, la barra resta
+            self.speak_progress.hide()
+            self.progress_label.hide()
+
+    def _cancel_synth(self) -> bool:
+        """■ Ferma durante la preparazione: quando finisce di caricare non parla più."""
+        p = self._prog
+        if not self._synth_busy or p is None or p["cancelled"]:
+            return False
+        p["cancelled"] = True
+        self._speak_gen += 1
+        self._prog_timer.stop()
+        self.speak_progress.setRange(0, 0)  # animazione: aspetto solo che il caricamento termini
+        self.progress_label.setText("Annullato: aspetto che finisca il caricamento, poi non parlerà.")
+        return True
 
     def preview_voice(self, voice_id: str) -> None:
         """Fa sentire la voce sul PC (non sui Google), così si sceglie senza disturbare nessuno."""
+        if self._synth_busy:
+            self.msg(self._BUSY_MSG, error=True)
+            return
         voice = next((v for v in self.voices if v.id == voice_id), None)
         lang = voice.lang if voice and voice.lang else (self.settings.get("clone_lang") or "it")
         text = tts.SAMPLE_PHRASES.get(lang, tts.SAMPLE_PHRASES["en"])
         rate = self.rate.value()
+        segs = [(voice_id, text)]
+        prog = self._begin_synth(segs)
+        gen = prog["gen"]
         self.msg("Preparo l'anteprima…")
 
         def job():
-            audio = tts.synthesize(voice_id, text, self.store, self.clone, rate, lang)
+            audio = self._synth_parts(prog, gen, segs, rate, lang)
+            if audio is None:  # annullata con ■ Ferma mentre si preparava
+                return False
+            self._stage_sig.stage.emit("play")
             if self._preview_proc and self._preview_proc.poll() is None:
                 self._preview_proc.terminate()  # una sola anteprima alla volta
             self._preview_proc = subprocess.Popen(
                 ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(audio)])
             self._preview_proc.wait()
+            return True
 
-        self.run_task(job, lambda _r: self.msg("Anteprima finita."))
+        def done(played):
+            self._finish_progress(gen)
+            self.msg("Anteprima finita." if played else "Anteprima annullata.")
+
+        def fail(msg):
+            self._finish_progress(gen, learn=False)
+            self.msg(msg, error=True)
+
+        self.run_task(job, done, fail)
 
     def _rate_changed(self, value: int) -> None:
         self.rate_label.setText(f"{value:+d}%")
         self.settings.set("rate", value)
 
     def speak(self, text: str | None = None, voice_id: str | None = None) -> None:
-        text = (text if isinstance(text, str) else self.text.toPlainText()).strip()
-        if not text:
+        if self._synth_busy:  # pulsante, Ctrl+Invio e frasi rapide passano tutti da qui
+            self.msg(self._BUSY_MSG, error=True)
+            return
+        default_voice = voice_id or self.text.current_voice() or self.voice_picker.current_id()
+        if isinstance(text, str):  # chiamata diretta (es. «Prova la voce»): un solo pezzo
+            segs = [(default_voice, text.strip())]
+        else:  # il messaggio scritto, con le sue voci
+            segs = self.text.segments(default_voice)
+        segs = [(v, t) for v, t in segs if t]
+        if not segs:
             self.msg("Scrivi prima un messaggio.", error=True)
             return
         devices = self._targets()
         if not devices:
             return
-        voice_id = voice_id or self.voice_picker.current_id()
         rate = self.rate.value()
         lang = self.settings.get("clone_lang") or "it"
         self._set_busy(1)
-        self.msg("Preparo la voce…")
+        prog = self._begin_synth(segs)
+        gen = prog["gen"]
+        self.msg("Preparo la voce…" if len(segs) == 1 else f"Preparo la voce ({len(segs)} parti)…")
 
         def job():
-            audio = tts.synthesize(voice_id, text, self.store, self.clone, rate, lang)
+            audio = self._synth_parts(prog, gen, segs, rate, lang)
+            if audio is None:  # annullato con ■ Ferma mentre si preparava: non parla
+                return None
+            self._stage_sig.stage.emit("send")
             audio = prepare_audio(audio)
             return self.player.play_many(devices, audio, title="CastVoice")
 
         def done(errors):
             self._set_busy(-1)
-            self._report(devices, errors, "Messaggio inviato")
+            self._finish_progress(gen)
+            if errors is None:
+                self.msg("Annullato: non ho inviato nulla.")
+            else:
+                self._report(devices, errors, "Messaggio inviato")
 
         def fail(msg):
             self._set_busy(-1)
+            self._finish_progress(gen, learn=False)
             self.msg(msg, error=True)
 
         self.run_task(job, done, fail)
 
     def save_phrase(self) -> None:
-        text = self.text.toPlainText().strip()
-        if not text:
+        segs = self.text.segments(self.text.current_voice() or self.voice_picker.current_id())
+        if not segs:
             return
         phrases = self.settings.get("phrases")
-        phrases.append({"text": text, "voice": self.voice_picker.current_id()})
+        phrases.append({"text": " ".join(t for _v, t in segs), "voice": segs[0][0],
+                        "segments": [[v, t] for v, t in segs]})  # più voci nella stessa frase
         self.settings.set("phrases", phrases)
         self.refresh_phrases()
 
@@ -779,9 +1069,13 @@ class MainWindow(QMainWindow):
             self.phrase_list.addItem(item)
 
     def _phrase_activated(self, item: QListWidgetItem) -> None:
+        if self._synth_busy:
+            self.msg(self._BUSY_MSG, error=True)
+            return
         p = self.settings.get("phrases")[self.phrase_list.row(item)]
-        self.text.setPlainText(p["text"])
-        self.speak(p["text"], p.get("voice") or self.voice_picker.current_id())
+        voice = p.get("voice") or self.voice_picker.current_id()
+        self.text.set_segments([(v, t) for v, t in (p.get("segments") or [[voice, p["text"]]])])
+        self.speak()
 
     def delete_phrase(self) -> None:
         row = self.phrase_list.currentRow()
@@ -792,7 +1086,10 @@ class MainWindow(QMainWindow):
             self.refresh_phrases()
 
     def stop_all(self) -> None:
-        devices = self._targets()
+        cancelled = self._cancel_synth()  # se sta ancora preparando la voce, la annulla
+        devices = self.panel.checked() if cancelled else self._targets()
+        if cancelled:
+            self.msg("Annullato.")
         if devices:
             self.run_task(lambda: self.player.stop_many(devices), lambda e: self._report(devices, e, "Fermato"))
 
@@ -942,7 +1239,13 @@ class MainWindow(QMainWindow):
         lang_row.addWidget(self.lang_combo)
         lang_row.addStretch(1)
         lay.addLayout(lang_row)
-        lay.addWidget(self._label("Motore di clonazione (XTTS v2, gira sulla tua GPU)", "title"))
+        lay.addWidget(self._label("Modello di clonazione (gira sulla tua GPU)", "title"))
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("Qwen3-TTS 1.7B · più realistico, licenza libera (Apache-2.0)", "qwen")
+        self.engine_combo.addItem("XTTS v2 · Coqui, solo uso non commerciale", "xtts")
+        self.engine_combo.setCurrentIndex(max(0, self.engine_combo.findData(self._clone_engine())))
+        self.engine_combo.currentIndexChanged.connect(self._engine_changed)
+        lay.addWidget(self.engine_combo)
         self.engine_status = self._label("", "muted")
         lay.addWidget(self.engine_status)
         self.license_check = QCheckBox(
@@ -965,15 +1268,30 @@ class MainWindow(QMainWindow):
         self.settings.set("xtts_license_accepted", value)
         self._update_engine_status()
 
+    def _clone_engine(self) -> str:
+        e = self.settings.get("clone_engine")
+        return e if e in tts.CLONE_ENGINES else tts.DEFAULT_CLONE_ENGINE
+
+    def _engine_changed(self, _index: int) -> None:
+        self.settings.set("clone_engine", self.engine_combo.currentData())
+        self.clone.release()  # il nuovo modello si carica al prossimo uso
+        self._update_engine_status()
+
     def _update_engine_status(self) -> None:
-        if not tts.CloneEngine.installed():
-            text = "Non installato. Serve una volta sola (qualche GB di download)."
+        engine = self._clone_engine()
+        name = tts.CLONE_ENGINES[engine][0]
+        size = "~3,9 GB" if engine == "qwen" else "~1,8 GB"
+        needs_license = engine == "xtts"
+        self.license_check.setVisible(needs_license)
+        if not tts.CloneEngine.engine_installed(engine):
+            text = f"{name} non è installato. Serve una volta sola (qualche GB di download)."
+            self.install_btn.setText(f"⬇ Installa {name}")
             self.install_btn.show()
-        elif not self.settings.get("xtts_license_accepted"):
+        elif needs_license and not self.settings.get("xtts_license_accepted"):
             text = "Installato. Accetta la licenza qui sotto per poterlo usare."
             self.install_btn.hide()
         else:
-            text = "Pronto. Il modello (~1,8 GB) si scarica automaticamente al primo uso."
+            text = f"{name} pronto. Il modello ({size}) si scarica automaticamente al primo uso."
             self.install_btn.hide()
         self.engine_status.setText(text)
 
@@ -988,7 +1306,7 @@ class MainWindow(QMainWindow):
         proc.readyRead.connect(lambda: self._install_output(proc))
         proc.finished.connect(lambda code, _s: self._install_done(code))
         self.install_proc = proc
-        proc.start("bash", ["-lc", tts.CLONE_INSTALL_CMD])
+        proc.start("bash", ["-lc", tts.CLONE_ENGINES[self._clone_engine()][3]])
 
     def _install_output(self, proc: QProcess) -> None:
         lines = bytes(proc.readAll()).decode(errors="replace").strip().splitlines()
@@ -1010,6 +1328,7 @@ class MainWindow(QMainWindow):
             li.setData(Qt.UserRole, p.slug)
             self.profile_list.addItem(li)
         self.fill_voices(online=False) if not self.voices else None
+        self._rebuild_slots()  # le voci clonate sono le prime scorciatoie
 
     def _profiles_changed(self) -> None:
         self.refresh_profiles()

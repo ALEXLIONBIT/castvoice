@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,39 +106,83 @@ def list_voices(store: VoiceStore, online: bool = True) -> list[Voice]:
 # Clonazione (XTTS v2) in un processo separato, fuori dal progetto
 # --------------------------------------------------------------------------
 WORKER = Path(__file__).with_name("clone_worker.py")
-CLONE_INSTALL_CMD = (
-    f'uv venv --python 3.12 "{paths.CLONE_ENV}" && '
-    f'uv pip install --python "{paths.CLONE_ENV}/bin/python" '
+QWEN_WORKER = Path(__file__).with_name("qwen_worker.py")
+_UV_CUDA = (
     "--extra-index-url https://download.pytorch.org/whl/cu128 --index-strategy unsafe-best-match "
-    '"coqui-tts[codec]" six torch torchaudio'
 )
+# Modelli di clonazione disponibili: id -> (nome, ambiente Python, worker, comando di installazione)
+CLONE_ENGINES = {
+    "qwen": ("Qwen3-TTS 1.7B", paths.CLONE_ENV_QWEN, QWEN_WORKER,
+             f'uv venv --python 3.12 "{paths.CLONE_ENV_QWEN}" && '
+             f'uv pip install --python "{paths.CLONE_ENV_QWEN}/bin/python" {_UV_CUDA}'
+             "qwen-tts torch torchaudio soundfile huggingface_hub"),
+    "xtts": ("XTTS v2", paths.CLONE_ENV, WORKER,
+             f'uv venv --python 3.12 "{paths.CLONE_ENV}" && '
+             f'uv pip install --python "{paths.CLONE_ENV}/bin/python" {_UV_CUDA}'
+             '"coqui-tts[codec]" six torch torchaudio'),
+}
+DEFAULT_CLONE_ENGINE = "qwen"
+CLONE_INSTALL_CMD = CLONE_ENGINES["xtts"][3]  # compatibilità con il vecchio nome
 
 
 class CloneEngine:
-    def __init__(self, license_accepted) -> None:
-        self._license_accepted = license_accepted  # callable -> bool
+    def __init__(self, license_accepted, engine=lambda: DEFAULT_CLONE_ENGINE) -> None:
+        self._license_accepted = license_accepted  # callable -> bool (licenza XTTS)
+        self._engine = engine                      # callable -> "qwen" | "xtts" (scelta dell'utente)
+        self._running: str | None = None           # modello attualmente caricato nel processo
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self.ready = False
+        self.on_stage = None   # callable(str) chiamata (da un thread di lavoro) quando cambia fase: "load" | "synth"
+        self.timing: dict[str, float] = {}  # durate misurate dell'ultima richiesta: "load", "synth" (secondi)
+
+    def _notify(self, stage: str) -> None:
+        cb = self.on_stage
+        if cb:
+            try:
+                cb(stage)
+            except Exception:  # noqa: BLE001 - un problema dell'interfaccia non deve fermare la sintesi
+                log.exception("on_stage fallita")
+
+    def needs_load(self) -> bool:
+        """True se la prossima sintesi deve prima caricare il modello (lento)."""
+        return self._proc is None or self._proc.poll() is not None or self._running != self._wanted()
+
+    @staticmethod
+    def engine_installed(engine: str) -> bool:
+        return (CLONE_ENGINES[engine][1] / "bin" / "python").exists()
+
+    @staticmethod
+    def qwen_installed() -> bool:
+        return CloneEngine.engine_installed("qwen")
 
     @staticmethod
     def installed() -> bool:
-        return (paths.CLONE_ENV / "bin" / "python").exists()
+        return any(CloneEngine.engine_installed(e) for e in CLONE_ENGINES)
 
-    def _start(self) -> None:
-        if not self.installed():
-            raise ClonePending("Il motore di clonazione non è installato (scheda «La mia voce»).")
-        if not self._license_accepted():
+    def _wanted(self) -> str:
+        e = self._engine()
+        return e if e in CLONE_ENGINES else DEFAULT_CLONE_ENGINE
+
+    def _start(self, engine: str) -> None:
+        name, env_dir, worker, _ = CLONE_ENGINES[engine]
+        if not self.engine_installed(engine):
+            raise ClonePending(f"Il modello {name} non è installato (scheda «La mia voce»).")
+        if engine == "xtts" and not self._license_accepted():
             raise ClonePending("Accetta la licenza del modello XTTS nella scheda «La mia voce».")
         env = {**os.environ, "COQUI_TOS_AGREED": "1", "PYTHONNOUSERSITE": "1"}
+        self._notify("load")
+        t0 = time.monotonic()
         self._proc = subprocess.Popen(
-            [str(paths.CLONE_ENV / "bin" / "python"), str(WORKER)],
+            [str(env_dir / "bin" / "python"), str(worker)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, env=env, start_new_session=True,
         )
         first = self._read()
         if not first.get("ready"):
             raise RuntimeError(first.get("error", "il motore di clonazione non parte"))
+        self.timing["load"] = time.monotonic() - t0
+        self._running = engine
         self.ready = True
 
     def _read(self) -> dict:
@@ -149,24 +194,63 @@ class CloneEngine:
             raise RuntimeError("il motore di clonazione si è chiuso")
         return json.loads(line)
 
-    def synthesize(self, sample: Path, text: str, out: Path, lang: str = "it", speed: float = 1.0) -> Path:
+    def synthesize(self, sample: Path, text: str, out: Path, lang: str = "it", speed: float = 1.0,
+                   ref_text: str = "") -> Path:
         with self._lock:
+            wanted = self._wanted()
+            if self._proc is not None and self._running != wanted:
+                self._stop()  # l'utente ha cambiato modello: scarica quello vecchio dalla GPU
             if self._proc is None or self._proc.poll() is not None:
-                self._start()
+                self._start(wanted)
+            self._notify("synth")
+            t0 = time.monotonic()
             assert self._proc and self._proc.stdin
-            req = {"text": text, "sample": str(sample), "out": str(out), "lang": lang, "speed": speed}
+            req = {"text": text, "sample": str(sample), "out": str(out), "lang": lang, "speed": speed,
+                   "ref_text": ref_text}
             self._proc.stdin.write(json.dumps(req) + "\n")
             self._proc.stdin.flush()
             resp = self._read()
+            self.timing["synth"] = time.monotonic() - t0
         if not resp.get("ok"):
             raise RuntimeError(resp.get("error", "sintesi non riuscita"))
         return out
 
-    def close(self) -> None:
+    def _stop(self) -> None:
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
         self._proc = None
+        self._running = None
         self.ready = False
+
+    def release(self) -> None:
+        """Libera la GPU dopo un cambio di modello, senza bloccare l'interfaccia se è in corso una sintesi."""
+        if self._lock.acquire(blocking=False):
+            try:
+                self._stop()
+            finally:
+                self._lock.release()
+
+    def close(self) -> None:
+        self._stop()
+
+
+def join_audio(parts: list[Path], gap: float = 0.18) -> Path:
+    """Unisce più audio (anche di formati diversi) in uno solo, con una piccola pausa tra uno e l'altro."""
+    if len(parts) == 1:
+        return parts[0]
+    paths.ensure_dirs()
+    out = paths.CACHE_DIR / f"{uuid.uuid4().hex}.wav"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for p in parts:
+        cmd += ["-i", str(p)]
+    chains = [
+        f"[{i}:a]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono"
+        + (f",apad=pad_dur={gap}" if i < len(parts) - 1 else "") + f"[a{i}]"
+        for i in range(len(parts))
+    ]
+    graph = ";".join(chains) + ";" + "".join(f"[a{i}]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1[o]"
+    subprocess.run(cmd + ["-filter_complex", graph, "-map", "[o]", str(out)], check=True)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -199,5 +283,6 @@ def synthesize(voice_id: str, text: str, store: VoiceStore, clone: CloneEngine,
         profile = next((p for p in store.profiles() if p.slug == name), None)
         if profile is None:
             raise RuntimeError("profilo voce non trovato")
-        return clone.synthesize(profile.sample, text, out.with_suffix(".wav"), lang, 1 + rate / 100)
+        return clone.synthesize(profile.sample, text, out.with_suffix(".wav"), lang, 1 + rate / 100,
+                                profile.ref_text)
     raise ValueError(f"voce sconosciuta: {voice_id}")

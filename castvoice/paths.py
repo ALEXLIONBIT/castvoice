@@ -17,6 +17,7 @@ CLIPS_DIR = DATA_DIR / "clips"          # clip registrate dall'utente
 VOICES_DIR = DATA_DIR / "voices"        # campioni per la clonazione (privati)
 CACHE_DIR = DATA_DIR / "cache"          # audio generati (si può cancellare)
 CLONE_ENV = DATA_DIR / "clone-env"      # ambiente Python separato per XTTS
+CLONE_ENV_QWEN = DATA_DIR / "clone-env-qwen"  # ambiente separato per Qwen3-TTS (preferito se presente)
 LIBRARY_FILE = DATA_DIR / "library.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 

@@ -53,6 +53,9 @@ class Settings:
         "phrases": [],                              # frasi rapide [{text, voice}]
         "favorite_voices": [],                      # id delle voci preferite
         "xtts_license_accepted": False,             # licenza CPML del modello XTTS
+        "clone_engine": "qwen",                     # modello di clonazione: "qwen" | "xtts"
+        "timing": {},                               # tempi misurati (s) per stimare la barra: load, synth_per_char
+        "voice_slots": None,                        # id delle voci su Alt+1…Alt+9 (None = automatico)
         "mic": "",                                  # sorgente audio per registrare
     }
 
@@ -135,6 +138,12 @@ class Profile:
     @property
     def sample(self) -> Path:
         return paths.VOICES_DIR / self.slug / "sample.wav"
+
+    @property
+    def ref_text(self) -> str:
+        """Trascrizione del campione (opzionale, migliora la clonazione con Qwen3-TTS)."""
+        meta = _read_json(paths.VOICES_DIR / self.slug / "meta.json", {})
+        return meta.get("ref_text", "") if isinstance(meta, dict) else ""
 
 
 class VoiceStore:
