@@ -14,6 +14,7 @@ Il risultato è in dist-release/. I dati personali (voce, campioni) NON entrano 
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -57,10 +58,17 @@ def fetch_ffmpeg() -> Path:
                     (binp / Path(n).name).write_bytes(zf.read(n))
     elif MAC:
         for tool in ("ffmpeg", "ffprobe", "ffplay"):
-            url = "https://evermeet.cx/ffmpeg/getrelease/zip" if tool == "ffmpeg" else f"https://evermeet.cx/ffmpeg/getrelease/{tool}/zip"
-            z = download(url, tmp / f"{tool}.zip")
-            with zipfile.ZipFile(z) as zf:
-                zf.extract(tool, binp)
+            try:  # evermeet.cx elenca gli ultimi file in JSON: info/<programma>/release
+                req = urllib.request.Request(f"https://evermeet.cx/ffmpeg/info/{tool}/release", headers={"User-Agent": "castvoice-build"})
+                info = json.loads(urllib.request.urlopen(req, timeout=60).read())
+                z = download(info["download"]["zip"]["url"], tmp / f"{tool}.zip")
+                with zipfile.ZipFile(z) as zf:
+                    zf.extract(tool, binp)
+            except Exception as exc:  # noqa: BLE001
+                if tool == "ffplay":  # l'anteprima ripiega sul lettore di sistema
+                    print(f"   ffplay non disponibile ({exc}): si userà il lettore di sistema", flush=True)
+                else:
+                    raise
     else:
         t = download("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz", tmp / "ff.tar.xz")
         with tarfile.open(t) as tf:
